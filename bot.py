@@ -1,7 +1,7 @@
 import os
 import logging
 import json
-import aiohttp
+import requests
 from telegram import Update, InputFile, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
 from dotenv import load_dotenv
@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# OpenRouter Service
+# OpenRouter Service (requests bilan)
 class OpenRouterService:
     def __init__(self):
         self.api_url = Config.OPENROUTER_API_URL
@@ -36,7 +36,7 @@ class OpenRouterService:
         self.model = Config.MODEL
         self.db = Database()
     
-    async def get_response(self, prompt: str) -> str:
+    def get_response(self, prompt: str) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -67,31 +67,32 @@ class OpenRouterService:
         }
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.api_url, 
-                    headers=headers, 
-                    data=json.dumps(payload),
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as response:
-                    
-                    if response.status == 200:
-                        result = await response.json()
-                        return result['choices'][0]['message']['content'].strip()
-                    else:
-                        error_text = await response.text()
-                        return f"❌ Xatolik yuz berdi (Status: {response.status})"
+            response = requests.post(
+                self.api_url, 
+                headers=headers, 
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result['choices'][0]['message']['content'].strip()
+            else:
+                return f"❌ Xatolik yuz berdi (Status: {response.status_code})"
                         
-        except aiohttp.ClientError as e:
+        except requests.exceptions.RequestException as e:
             return f"❌ Serverga ulanishda xatolik: {str(e)}"
         except Exception as e:
             return f"❌ Kutilmagan xatolik: {str(e)}"
 
-# Bot Handlers
+# Database.py o'zgarmaydi (oldingi kabi qoladi)
+# Bot Handlers klassi o'zgarmaydi (oldingi kabi qoladi)
+
+# Asosiy bot (o'zgartirilgan qism)
 class BotHandlers:
     def __init__(self):
         self.db = Database()
-        self.openai_service = OpenRouterService()
+        self.openai_service = OpenRouterService()  # Endi bu sync
     
     def _is_admin(self, user_id: int) -> bool:
         return user_id == Config.ADMIN_ID
@@ -139,7 +140,45 @@ class BotHandlers:
         """
         await update.message.reply_text(admin_text)
     
-    # Statistika
+    # Asosiy message handler (o'zgartirildi)
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        user_message = update.message.text
+        
+        # Admin reklama tasdiqlash
+        if user_message.lower() in ['ha', 'yo\'q'] and self._is_admin(user.id):
+            await self._handle_broadcast_confirmation(update, context, user_message)
+            return
+        
+        # Oddiy foydalanuvchi savoli
+        self.db.update_user(user.id, user.username, user.first_name)
+        
+        # Kutish xabarini yuborish
+        wait_msg = await update.message.reply_text("⏳ Javob tayyorlanmoqda...")
+        
+        try:
+            # Endi bu sync funksiya, shuning uchun threadda ishlatamiz
+            response = await context.application.run_async(
+                self.openai_service.get_response, user_message
+            )
+            
+            # Savollar sonini yangilash
+            self.db.increment_questions(user.id)
+            
+            # Kutish xabarini o'chirish
+            await wait_msg.delete()
+            
+            # Javobni yuborish
+            await update.message.reply_text(response)
+            
+        except Exception as e:
+            await wait_msg.delete()
+            await update.message.reply_text("❌ Javob olishda xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring.")
+            logger.error(f"Xatolik: {e}")
+    
+    # Qolgan metodlar o'zgarmaydi...
+    # [stats, users, add_knowledge, view_knowledge, broadcast_start, handle_media, _handle_broadcast_confirmation]
+    
     async def show_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -158,7 +197,6 @@ class BotHandlers:
         """
         await update.message.reply_text(stats_text)
     
-    # Foydalanuvchilar ro'yxati
     async def show_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -180,7 +218,6 @@ class BotHandlers:
         
         await update.message.reply_text(users_text)
     
-    # Ma'lumot qo'shish
     async def add_knowledge(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -206,7 +243,6 @@ class BotHandlers:
         self.db.add_knowledge(question.strip(), answer.strip())
         await update.message.reply_text("✅ **Yangi ma'lumot muvaffaqiyatli qo'shildi!**")
     
-    # Ma'lumotlar bazasini ko'rish
     async def view_knowledge(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -230,7 +266,6 @@ class BotHandlers:
         
         await update.message.reply_text(knowledge_text)
     
-    # Reklama boshqaruvi
     async def broadcast_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -245,11 +280,6 @@ Quyidagi buyruqlardan birini tanlang:
 `/broadcast text` - Matnli reklama
 `/broadcast photo` - Rasmli reklama  
 `/broadcast video` - Videoli reklama
-
-**Ishlash tartibi:**
-1. Buyruqni tanlang
-2. Rasm/video yuboring yoki matn yozing
-3. Tasdiqlang
             """)
             return
         
@@ -265,7 +295,6 @@ Quyidagi buyruqlardan birini tanlang:
         else:
             await update.message.reply_text("❌ Noto'g'ri tur. Faqat: text, photo, video")
     
-    # Media handler (reklama uchun)
     async def handle_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             return
@@ -294,40 +323,6 @@ Quyidagi buyruqlardan birini tanlang:
                 f"Reklamani yuborishni tasdiqlaysizmi? (Ha / Yo'q)"
             )
     
-    # Asosiy message handler
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        user_message = update.message.text
-        
-        # Admin reklama tasdiqlash
-        if user_message.lower() in ['ha', 'yo\'q'] and self._is_admin(user.id):
-            await self._handle_broadcast_confirmation(update, context, user_message)
-            return
-        
-        # Oddiy foydalanuvchi savoli
-        self.db.update_user(user.id, user.username, user.first_name)
-        
-        # Kutish xabarini yuborish
-        wait_msg = await update.message.reply_text("⏳ Javob tayyorlanmoqda...")
-        
-        try:
-            # OpenAI dan javob olish
-            response = await self.openai_service.get_response(user_message)
-            
-            # Savollar sonini yangilash
-            self.db.increment_questions(user.id)
-            
-            # Kutish xabarini o'chirish
-            await wait_msg.delete()
-            
-            # Javobni yuborish
-            await update.message.reply_text(response)
-            
-        except Exception as e:
-            await wait_msg.delete()
-            await update.message.reply_text("❌ Javob olishda xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring.")
-    
-    # Reklama tasdiqlash
     async def _handle_broadcast_confirmation(self, update: Update, context: ContextTypes.DEFAULT_TYPE, confirmation: str):
         if confirmation.lower() == 'ha':
             await update.message.reply_text("🔄 Reklama yuborilmoqda...")
