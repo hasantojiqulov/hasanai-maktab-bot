@@ -4,22 +4,9 @@ import json
 import requests
 from telegram import Update, InputFile, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
-from dotenv import load_dotenv
+from config import Config
 from database import Database
 from datetime import datetime
-
-# Environment variables
-load_dotenv()
-
-# Konfiguratsiya
-class Config:
-    BOT_TOKEN = os.getenv('BOT_TOKEN')
-    OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
-    ADMIN_ID = int(os.getenv('ADMIN_ID'))
-    OPENROUTER_API_URL = os.getenv('OPENROUTER_API_URL')
-    MODEL = "google/gemini-pro-1.5"
-    MAX_TOKENS = 1000
-    TEMPERATURE = 0.7
 
 # Logging
 logging.basicConfig(
@@ -28,7 +15,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# OpenRouter Service (requests bilan)
+# Konfiguratsiyani tekshirish
+config_errors = Config.validate_config()
+if config_errors:
+    for error in config_errors:
+        logger.error(f"❌ {error}")
+    logger.error("❌ Bot ishga tushirish uchun konfiguratsiya to'liq emas!")
+    exit(1)
+
+# OpenRouter Service
 class OpenRouterService:
     def __init__(self):
         self.api_url = Config.OPENROUTER_API_URL
@@ -78,21 +73,21 @@ class OpenRouterService:
                 result = response.json()
                 return result['choices'][0]['message']['content'].strip()
             else:
+                logger.error(f"OpenRouter xatosi: {response.status_code} - {response.text}")
                 return f"❌ Xatolik yuz berdi (Status: {response.status_code})"
                         
         except requests.exceptions.RequestException as e:
-            return f"❌ Serverga ulanishda xatolik: {str(e)}"
+            logger.error(f"OpenRouter ulanish xatosi: {e}")
+            return f"❌ Serverga ulanishda xatolik"
         except Exception as e:
-            return f"❌ Kutilmagan xatolik: {str(e)}"
+            logger.error(f"OpenRouter kutilmagan xatolik: {e}")
+            return f"❌ Kutilmagan xatolik"
 
-# Database.py o'zgarmaydi (oldingi kabi qoladi)
-# Bot Handlers klassi o'zgarmaydi (oldingi kabi qoladi)
-
-# Asosiy bot (o'zgartirilgan qism)
+# Bot Handlers
 class BotHandlers:
     def __init__(self):
         self.db = Database()
-        self.openai_service = OpenRouterService()  # Endi bu sync
+        self.openai_service = OpenRouterService()
     
     def _is_admin(self, user_id: int) -> bool:
         return user_id == Config.ADMIN_ID
@@ -115,14 +110,17 @@ class BotHandlers:
 👨‍💻 **Admin:** /admin
         """
         await update.message.reply_text(welcome_text)
+        logger.info(f"Yangi foydalanuvchi: {user.id} - {user.first_name}")
     
     # Admin paneli
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._is_admin(update.effective_user.id):
+        user_id = update.effective_user.id
+        if not self._is_admin(user_id):
             await update.message.reply_text("❌ Siz admin emassiz!")
+            logger.warning(f"Admin panelga urinish: {user_id}")
             return
         
-        admin_text = """
+        admin_text = f"""
 🛠️ **Admin Panel - HasanAI**
 
 📊 **Statistika:**
@@ -137,10 +135,13 @@ class BotHandlers:
 
 📢 **Reklama:**
 /broadcast - Hammaga xabar yuborish
+
+🆔 **Sizning ID:** {user_id}
         """
         await update.message.reply_text(admin_text)
+        logger.info(f"Admin panel ochildi: {user_id}")
     
-    # Asosiy message handler (o'zgartirildi)
+    # Asosiy message handler
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         user_message = update.message.text
@@ -170,15 +171,14 @@ class BotHandlers:
             
             # Javobni yuborish
             await update.message.reply_text(response)
+            logger.info(f"Foydalanuvchi savoli: {user.id} - {user_message[:50]}...")
             
         except Exception as e:
             await wait_msg.delete()
             await update.message.reply_text("❌ Javob olishda xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring.")
             logger.error(f"Xatolik: {e}")
     
-    # Qolgan metodlar o'zgarmaydi...
-    # [stats, users, add_knowledge, view_knowledge, broadcast_start, handle_media, _handle_broadcast_confirmation]
-    
+    # Statistika
     async def show_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -197,6 +197,7 @@ class BotHandlers:
         """
         await update.message.reply_text(stats_text)
     
+    # Foydalanuvchilar ro'yxati
     async def show_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -218,6 +219,7 @@ class BotHandlers:
         
         await update.message.reply_text(users_text)
     
+    # Ma'lumot qo'shish
     async def add_knowledge(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -243,6 +245,7 @@ class BotHandlers:
         self.db.add_knowledge(question.strip(), answer.strip())
         await update.message.reply_text("✅ **Yangi ma'lumot muvaffaqiyatli qo'shildi!**")
     
+    # Ma'lumotlar bazasini ko'rish
     async def view_knowledge(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -266,6 +269,7 @@ class BotHandlers:
         
         await update.message.reply_text(knowledge_text)
     
+    # Reklama boshqaruvi
     async def broadcast_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Siz admin emassiz!")
@@ -295,6 +299,7 @@ Quyidagi buyruqlardan birini tanlang:
         else:
             await update.message.reply_text("❌ Noto'g'ri tur. Faqat: text, photo, video")
     
+    # Media handler (reklama uchun)
     async def handle_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             return
@@ -323,6 +328,7 @@ Quyidagi buyruqlardan birini tanlang:
                 f"Reklamani yuborishni tasdiqlaysizmi? (Ha / Yo'q)"
             )
     
+    # Reklama tasdiqlash
     async def _handle_broadcast_confirmation(self, update: Update, context: ContextTypes.DEFAULT_TYPE, confirmation: str):
         if confirmation.lower() == 'ha':
             await update.message.reply_text("🔄 Reklama yuborilmoqda...")
@@ -368,6 +374,14 @@ Quyidagi buyruqlardan birini tanlang:
 
 # Asosiy bot
 def main():
+    # Konfiguratsiyani tekshirish
+    config_errors = Config.validate_config()
+    if config_errors:
+        for error in config_errors:
+            logger.error(f"❌ {error}")
+        logger.error("❌ Bot ishga tushirish uchun konfiguratsiya to'liq emas!")
+        return
+    
     # Botni yaratish
     application = Application.builder().token(Config.BOT_TOKEN).build()
     
@@ -389,6 +403,7 @@ def main():
     
     # Botni ishga tushirish
     logger.info("HasanAI bot ishga tushdi...")
+    logger.info(f"Admin ID: {Config.ADMIN_ID}")
     application.run_polling()
 
 if __name__ == '__main__':
