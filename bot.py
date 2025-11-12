@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import requests
-from telegram import Update, InputFile, InputMediaPhoto, InputMediaVideo
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
 from config import Config
 from database import Database
@@ -147,7 +147,7 @@ class BotHandlers:
         user_message = update.message.text
         
         # Admin reklama tasdiqlash
-        if user_message.lower() in ['ha', 'yo\'q'] and self._is_admin(user.id):
+        if user_message and user_message.lower() in ['ha', 'yo\'q'] and self._is_admin(user.id):
             await self._handle_broadcast_confirmation(update, context, user_message)
             return
         
@@ -352,13 +352,17 @@ Quyidagi buyruqlardan birini tanlang:
                             caption=context.user_data.get('broadcast_caption', '')
                         )
                     else:
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=context.user_data.get('broadcast_text', '')
-                        )
+                        # Text reklama
+                        broadcast_text = context.user_data.get('broadcast_text', '')
+                        if broadcast_text:
+                            await context.bot.send_message(
+                                chat_id=user_id,
+                                text=broadcast_text
+                            )
                     success_count += 1
                 except Exception as e:
                     error_count += 1
+                    logger.error(f"Reklama yuborishda xatolik {user_id}: {e}")
             
             # Tozalash
             context.user_data.clear()
@@ -371,6 +375,18 @@ Quyidagi buyruqlardan birini tanlang:
         else:
             context.user_data.clear()
             await update.message.reply_text("❌ Reklama bekor qilindi.")
+
+# Text reklama uchun handler
+async def handle_broadcast_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not BotHandlers()._is_admin(update.effective_user.id):
+        return
+    
+    if 'broadcast_type' in context.user_data and context.user_data['broadcast_type'] == 'text':
+        context.user_data['broadcast_text'] = update.message.text
+        await update.message.reply_text(
+            f"📝 **Matn qabul qilindi!**\n\n{update.message.text}\n\n"
+            f"Reklamani yuborishni tasdiqlaysizmi? (Ha / Yo'q)"
+        )
 
 # Asosiy bot
 def main():
@@ -400,6 +416,12 @@ def main():
     # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_message))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handlers.handle_media))
+    
+    # Text reklama handler
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(?!(Ha|Yo\'q)$).*'), 
+        handle_broadcast_text
+    ))
     
     # Botni ishga tushirish
     logger.info("HasanAI bot ishga tushdi...")
